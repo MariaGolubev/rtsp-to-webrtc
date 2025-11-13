@@ -58,131 +58,132 @@ Navigate to http://localhost:8080 in your browser
 ## Command Line Options
 
 ```bash
-rtsp-to-webrtc [OPTIONS] --url <URL>
+Usage: rtsp-to-webrtc [OPTIONS] --url <URL>
 
-	Options:
-	--url <URL> RTSP URL to connect to (e.g., rtsp://localhost:8554/test)
-		--username <USERNAME> Username for RTSP authentication (optional)
-			--password <PASSWORD> Password for RTSP authentication (requires username)
-				--transport <TRANSPORT> Transport protocol: tcp or udp [default: tcp]
-					--teardown <TEARDOWN> Teardown policy: auto, always, or never [default: auto]
-						```
+Options:
+      --url <URL>              `rtsp://` URL to connect to
+      --username <USERNAME>    Username to send if the server requires authentication
+      --password <PASSWORD>    Password; requires username
+      --teardown <TEARDOWN>    When to issue a `TEARDOWN` request: `auto`, `always`, or `never` [default: auto]
+      --transport <TRANSPORT>  The transport to use: `tcp` or `udp` (experimental) [default: tcp]
+  -h, --help                   Print help
+```
 
-						## Development & Testing
+## Development & Testing
 
-						### Running the test RTSP server
+### Running the test RTSP server
 
-						A GStreamer-based test server is included for development:
+A GStreamer-based test server is included for development:
 
-						```bash
-						# Install GStreamer (Ubuntu/Debian)
-						sudo apt-get install python3-gi gstreamer1.0-tools gstreamer1.0-plugins-base \
-						gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-						gstreamer1.0-rtsp gstreamer1.0-libav
+```bash
+# Install GStreamer (Ubuntu/Debian)
+sudo apt-get install python3-gi gstreamer1.0-tools gstreamer1.0-plugins-base \
+gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+gstreamer1.0-rtsp gstreamer1.0-libav
 
-						# Install NVIDIA encoder (optional, for hardware acceleration)
-						sudo apt-get install gstreamer1.0-plugins-nvenc
+# Install NVIDIA encoder (optional, for hardware acceleration)
+sudo apt-get install gstreamer1.0-plugins-nvenc
 
-						# Run the test server
-						python3 rtsp_test_server.py
-						```
+# Run the test server
+python3 rtsp_test_server.py
+```
 
-						This creates two test streams:
-						- `rtsp://localhost:8554/test` - 640x480, ball pattern with ticks audio
-						- `rtsp://localhost:8554/test2` - 1280x720, SMPTE pattern with sine wave audio
+This creates two test streams:
+- `rtsp://localhost:8554/test` - 640x480, ball pattern with ticks audio
+- `rtsp://localhost:8554/test2` - 1280x720, SMPTE pattern with sine wave audio
 
-						Both streams include a timestamp overlay.
+Both streams include a timestamp overlay.
 
-						### Running the gateway with test stream
+### Running the gateway with test stream
 
-						```bash
-						# TCP (recommended for reliability)
-						cargo run -- --url=rtsp://localhost:8554/test
+```bash
+# TCP (recommended for reliability)
+cargo run -- --url=rtsp://localhost:8554/test
 
-						# UDP (for lower latency, may drop packets)
-						cargo run -- --url=rtsp://localhost:8554/test --transport=udp
-						```
+# UDP (for lower latency, may drop packets)
+cargo run -- --url=rtsp://localhost:8554/test --transport=udp
+```
 
-						## Web Player
+## Web Player
 
-						The built-in web player is available at `http://localhost:8080` and includes:
+The built-in web player is available at `http://localhost:8080` and includes:
 
-						- ▶️ Play/Pause controls
-						- 🔇 Mute/Unmute button
-						- 🔊 Volume slider
+- ▶️ Play/Pause controls
+- 🔇 Mute/Unmute button
+- 🔊 Volume slider
 
-						## API Endpoints
+## API Endpoints
 
-						### POST /whep
-						Create a new WHEP session
+### POST /whep
+Create a new WHEP session
 
-						**Request:**
-						- Content-Type: `application/sdp`
-						- Body: SDP offer
+**Request:**
+- Content-Type: `application/sdp`
+- Body: SDP offer
 
-						**Response:**
-						- Status: 201 Created
-						- Content-Type: `application/sdp`
-						- Location: `/resource/{session-id}`
-						- Body: SDP answer
+**Response:**
+- Status: 201 Created
+- Content-Type: `application/sdp`
+- Location: `/resource/{session-id}`
+- Body: SDP answer
 
-						### DELETE /whep/resource/{id}
-						Delete a WHEP session
+### DELETE /whep/resource/{id}
+Delete a WHEP session
 
-						**Response:**
-						- Status: 204 No Content (success)
-						- Status: 404 Not Found (session not found)
+**Response:**
+- Status: 204 No Content (success)
+- Status: 404 Not Found (session not found)
 
-						### GET /
-						Serves the static HTML player and assets
+### GET /
+Serves the static HTML player and assets
 
-						## Performance Optimizations
+## Performance Optimizations
 
-						- **Asynchronous packet processing** - RTSP reading and WebRTC writing happen in parallel
-						- **Buffered channels** - 100-packet buffer prevents packet loss during temporary congestion
-						- **Non-blocking writes** - Drops packets if buffer is full instead of blocking
-						- **Shared tracks** - Single RTP track shared among all clients for efficiency
+- **Asynchronous packet processing** - RTSP reading and WebRTC writing happen in parallel
+- **Buffered channels** - 100-packet buffer prevents packet loss during temporary congestion
+- **Non-blocking writes** - Drops packets if buffer is full instead of blocking
+- **Shared tracks** - Single RTP track shared among all clients for efficiency
 
-						## Troubleshooting
+## Troubleshooting
 
-						### Video freezes or stutters
-						- Try using TCP transport: `--transport=tcp`
-						- Check network connectivity to RTSP source
-						- Monitor logs for "buffer full" messages
+### Video freezes or stutters
+- Try using TCP transport: `--transport=tcp`
+- Check network connectivity to RTSP source
+- Monitor logs for "buffer full" messages
 
-						### No audio
-						- Ensure RTSP source provides audio stream
-						- Check supported codecs (Opus, PCMU, PCMA)
-						- Verify browser autoplay policy allows audio
+### No audio
+- Ensure RTSP source provides audio stream
+- Check supported codecs (Opus, PCMU, PCMA)
+- Verify browser autoplay policy allows audio
 
-						### Connection fails
-						- Verify RTSP URL is correct and accessible
-						- Check firewall settings
-						- Try with authentication if required: `--username=user --password=pass`
+### Connection fails
+- Verify RTSP URL is correct and accessible
+- Check firewall settings
+- Try with authentication if required: `--username=user --password=pass`
 
-						## Project Structure
+## Project Structure
 
-						```
-						rtsp-to-webrtc/
-						├── src/
-						│ └── main.rs # Main server code
-						├── static/
-						│ └── index.html # Web player
-						├── rtsp_test_server.py # Test RTSP server (GStreamer)
-						├── Cargo.toml # Rust dependencies
-						└── README.md # This file
-						```
+```
+rtsp-to-webrtc/
+├── src/
+│ └── main.rs # Main server code
+├── static/
+│ └── index.html # Web player
+├── rtsp_test_server.py # Test RTSP server (GStreamer)
+├── Cargo.toml # Rust dependencies
+└── README.md # This file
+```
 
-						## License
+## License
 
-						MIT License - feel free to use in your projects!
+MIT License - feel free to use in your projects!
 
-						## Contributing
+## Contributing
 
-						Contributions welcome! Please open an issue or PR.
+Contributions welcome! Please open an issue or PR.
 
-						## Acknowledgments
+## Acknowledgments
 
-						- Built with [webrtc-rs](https://github.com/webrtc-rs/webrtc)
-						- Uses [retina](https://github.com/scottlamb/retina) for RTSP client
-						- Web player uses [whep-video-component](https://github.com/Eyevinn/whep-video-component)
+- Built with [webrtc-rs](https://github.com/webrtc-rs/webrtc)
+- Uses [retina](https://github.com/scottlamb/retina) for RTSP client
+- Web player uses [whep-video-component](https://github.com/Eyevinn/whep-video-component)
