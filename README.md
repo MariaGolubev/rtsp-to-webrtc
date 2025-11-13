@@ -25,9 +25,9 @@ The server has three main components:
 3. **WebRTC Server** - Serves streams to browsers via WHEP protocol
 
 ```
-┌─────────────┐     RTSP/RTP    ┌──────────────┐   WHEP/WebRTC    ┌─────────┐
-│ RTSP Camera │ ──────────────> │ Rust Server │ ────────────────> │ Browser │
-└─────────────┘                 └──────────────┘                  └─────────┘
+┌─────────────┐     RTSP/RTP    ┌──────────────┐   WHEP/WebRTC     ┌─────────┐
+│ RTSP Camera │ ──────────────> │ Rust Server  │ ────────────────> │ Browser │
+└─────────────┘                 └──────────────┘                   └─────────┘
                                        │
                                        └──> Static file server (HTML player)
 ```
