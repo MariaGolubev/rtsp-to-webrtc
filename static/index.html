@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>RTSP to WebRTC</title>
+	<style>
+		body {
+			margin: 0;
+
+			padding: 20px;
+			font-family: Arial, sans-serif;
+			min-height: 100vh;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			background-color: #bbbbbb;
+		}
+
+		h1 {
+			text-align: center;
+		}
+
+		whep-video {
+			background: #000;
+			border-radius: 8px;
+			object-fit: contain;
+			box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+		}
+
+		.controls {
+			margin: 15px 0;
+			text-align: center;
+		}
+
+		button {
+			padding: 10px 20px;
+			margin: 5px;
+			cursor: pointer;
+			border: none;
+			border-radius: 5px;
+			background: #e7e7e7;
+			font-weight: bold;
+			transition: all 0.3s;
+		}
+
+		button:hover {
+			transform: translateY(-2px);
+			box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+		}
+
+		input[type="range"] {
+			vertical-align: middle;
+		}
+
+		#volumeDisplay {
+			font-weight: bold;
+		}
+	</style>
+</head>
+
+<body>
+	<h1>RTSP to WebRTC</h1>
+	<div class="video-wrapper">
+		<whep-video id="videoPlayer" src="http://localhost:8080/whep" autoplay></whep-video>
+		<div class="controls">
+			<button id="playBtn">▶ Play</button>
+			<button id="pauseBtn" style="display: none;">⏸ Pause</button>
+			<button id="muteBtn">🔇 Mute</button>
+			<input type="range" id="volumeSlider" min="0" max="100" value="100">
+			<span id="volumeDisplay">100%</span>
+		</div>
+	</div>
+
+	<script src="https://unpkg.com/@eyevinn/whep-video-component@latest/dist/whep-video.component.js"></script>
+	<script>
+		let video = null;
+
+		function init() {
+			const player = document.getElementById('videoPlayer');
+			video = player.shadowRoot?.querySelector('video');
+
+			if (!video) {
+				setTimeout(init, 100);
+				return;
+			}
+
+			// Play/Pause
+			document.getElementById('playBtn').onclick = () => {
+				video.play();
+				document.getElementById('playBtn').style.display = 'none';
+				document.getElementById('pauseBtn').style.display = 'inline';
+			};
+
+			document.getElementById('pauseBtn').onclick = () => {
+				video.pause();
+				document.getElementById('playBtn').style.display = 'inline';
+				document.getElementById('pauseBtn').style.display = 'none';
+			};
+
+			// Mute
+			document.getElementById('muteBtn').onclick = () => {
+				video.muted = !video.muted;
+				document.getElementById('muteBtn').textContent = video.muted ? '🔊 Unmute' : '🔇 Mute';
+			};
+
+			// Volume
+			document.getElementById('volumeSlider').oninput = (e) => {
+				video.volume = e.target.value / 100;
+				document.getElementById('volumeDisplay').textContent = e.target.value + '%';
+			};
+
+			// Auto update buttons
+			video.onplay = () => {
+				document.getElementById('playBtn').style.display = 'none';
+				document.getElementById('pauseBtn').style.display = 'inline';
+			};
+
+			video.onpause = () => {
+				document.getElementById('playBtn').style.display = 'inline';
+				document.getElementById('pauseBtn').style.display = 'none';
+			};
+
+			// Try autoplay
+			setTimeout(() => video.play().catch(e => console.log('Autoplay prevented')), 500);
+		}
+
+		init();
+	</script>
+</body>
+
+</html>

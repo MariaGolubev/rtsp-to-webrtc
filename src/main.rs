@@ -4,20 +4,19 @@ use axum::{
     extract::{FromRequest, State},
     response::IntoResponse,
 };
-// use clap::Parser;
+use clap::Parser;
+use retina::client::{PacketItem, SetupOptions};
+use tokio_stream::StreamExt;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
 use tracing::{error, info, trace, warn};
-// use retina::{client::SetupOptions, codec::CodecItem};
-// use tokio_stream::StreamExt;
 use webrtc::{
     Error as WebRTCError,
     api::{
-        API, APIBuilder,
-        interceptor_registry::register_default_interceptors,
-        media_engine::{MIME_TYPE_VP8, MediaEngine},
+        API, APIBuilder, interceptor_registry::register_default_interceptors,
+        media_engine::MediaEngine,
     },
     interceptor::registry::Registry,
     peer_connection::sdp::session_description::RTCSessionDescription,
@@ -73,55 +72,232 @@ mod rtsp_url {
     }
 }
 
-// #[derive(Parser)]
-// struct Source {
-// /// `rtsp://` URL to connect to.
-// #[clap(long)]
-// url: rtsp_url::RTSPUrl,
+#[derive(Parser)]
+struct Source {
+    /// `rtsp://` URL to connect to.
+    #[clap(long)]
+    url: rtsp_url::RTSPUrl,
 
-// /// Username to send if the server requires authentication.
-// #[clap(long)]
-// username: Option<String>,
+    /// Username to send if the server requires authentication.
+    #[clap(long)]
+    username: Option<String>,
 
-// /// Password; requires username.
-// #[clap(long, requires = "username")]
-// password: Option<String>,
+    /// Password; requires username.
+    #[clap(long, requires = "username")]
+    password: Option<String>,
 
-// /// When to issue a `TEARDOWN` request: `auto`, `always`, or `never`.
-// #[arg(default_value_t, long)]
-// teardown: retina::client::TeardownPolicy,
+    /// When to issue a `TEARDOWN` request: `auto`, `always`, or `never`.
+    #[arg(default_value_t, long)]
+    teardown: retina::client::TeardownPolicy,
 
-// /// The transport to use: `tcp` or `udp` (experimental).
-// #[arg(default_value_t, long)]
-// transport: retina::client::Transport,
-// }
+    /// The transport to use: `tcp` or `udp` (experimental).
+    #[arg(default_value_t, long)]
+    transport: retina::client::Transport,
+}
 
 #[derive(Clone)]
 struct AppState {
     pub api: Arc<API>,
     pub peer_connections: dashmap::DashMap<String, Arc<webrtc::peer_connection::RTCPeerConnection>>,
-    pub video_tracks: Arc<dashmap::DashMap<String, Arc<TrackLocalStaticRTP>>>,
+    pub video_track: (usize, Arc<TrackLocalStaticRTP>),
+    pub audio_track: Option<(usize, Arc<TrackLocalStaticRTP>)>,
 }
 
 impl AppState {
-    pub fn new(api: API) -> Self {
+    pub fn new(
+        api: API,
+        video_track: (usize, Arc<TrackLocalStaticRTP>),
+        audio_track: Option<(usize, Arc<TrackLocalStaticRTP>)>,
+    ) -> Self {
         Self {
             api: Arc::new(api),
             peer_connections: dashmap::DashMap::new(),
-            video_tracks: Arc::new(dashmap::DashMap::new()),
+            video_track,
+            audio_track,
         }
     }
 }
 
+// Video codec priorities (lower number = higher priority)
+const VIDEO_CODEC_PRIORITY: &[(&str, u32)] = &[("h265", 1), ("h264", 2), ("vp9", 3), ("vp8", 4)];
+
+// Audio codec priorities (lower number = higher priority)
+const AUDIO_CODEC_PRIORITY: &[(&str, u32)] = &[("opus", 1), ("pcmu", 2), ("pcma", 3)];
+
+// Get codec priority from the list
+fn get_codec_priority(encoding_name: &str, priority_list: &[(&str, u32)]) -> u32 {
+    priority_list
+        .iter()
+        .find(|(name, _)| *name == encoding_name)
+        .map(|(_, priority)| *priority)
+        .unwrap_or(100)
+}
+
 #[tokio::main]
 async fn main() {
-    // Инициализация tracing
+    // Initialize tracing
     tracing_subscriber::fmt()
         .with_level(true)
         .with_ansi(true)
         .init();
 
     info!("Starting RTSP to WebRTC server");
+
+    let source = Source::parse();
+
+    let mut session = {
+        let creds = match (source.username, source.password) {
+            (Some(user), pass) => Some(retina::client::Credentials {
+                username: user,
+                password: pass.unwrap_or_default(),
+            }),
+
+            _ => None,
+        };
+
+        let upstream_session_group = Arc::new(retina::client::SessionGroup::default());
+
+        retina::client::Session::describe(
+            source.url.into(),
+            retina::client::SessionOptions::default()
+                .creds(creds)
+                .teardown(source.teardown)
+                .session_group(upstream_session_group)
+                .user_agent("RTSP to WebRTC example".to_owned()),
+        )
+        .await
+        .unwrap()
+    };
+
+    let (video_track, audio_track) = {
+        let mut available_video_streams = Vec::new();
+        let mut available_audio_streams = Vec::new();
+
+        for (index, stream) in session.streams().iter().enumerate() {
+            if stream.media() == "video"
+                && VIDEO_CODEC_PRIORITY
+                    .iter()
+                    .any(|(name, _)| *name == stream.encoding_name())
+            {
+                available_video_streams.push((index, stream));
+            } else if stream.media() == "audio"
+                && AUDIO_CODEC_PRIORITY
+                    .iter()
+                    .any(|(name, _)| *name == stream.encoding_name())
+            {
+                available_audio_streams.push((index, stream));
+            }
+        }
+
+        if available_video_streams.is_empty() {
+            error!("No supported video streams found (h264 required)");
+            return;
+        }
+
+        // Sort video streams: first by resolution (higher is better), then by codec priority
+        available_video_streams.sort_by(|(_, a), (_, b)| {
+            use retina::codec::ParametersRef;
+
+            let resolution_a = match a.parameters() {
+                Some(ParametersRef::Video(v)) => {
+                    let (w, h) = v.pixel_dimensions();
+                    w * h
+                }
+                _ => 0,
+            };
+
+            let resolution_b = match b.parameters() {
+                Some(ParametersRef::Video(v)) => {
+                    let (w, h) = v.pixel_dimensions();
+                    w * h
+                }
+                _ => 0,
+            };
+
+            // First compare by resolution (higher to lower)
+            match resolution_b.cmp(&resolution_a) {
+                std::cmp::Ordering::Equal => {
+                    // If resolution is the same, compare by codec priority
+                    get_codec_priority(a.encoding_name(), VIDEO_CODEC_PRIORITY)
+                        .cmp(&get_codec_priority(b.encoding_name(), VIDEO_CODEC_PRIORITY))
+                }
+                other => other,
+            }
+        });
+
+        // Sort audio streams by codec priority only
+        available_audio_streams.sort_by(|(_, a), (_, b)| {
+            get_codec_priority(a.encoding_name(), AUDIO_CODEC_PRIORITY)
+                .cmp(&get_codec_priority(b.encoding_name(), AUDIO_CODEC_PRIORITY))
+        });
+
+        let video_track = {
+            let video_stream = available_video_streams[0];
+            {
+                use retina::codec::ParametersRef;
+                let (width, height) = match video_stream.1.parameters() {
+                    Some(ParametersRef::Video(v)) => v.pixel_dimensions(),
+                    _ => (0, 0),
+                };
+                info!(
+                    "Selected video stream #{}: {} {}x{}",
+                    video_stream.0,
+                    video_stream.1.encoding_name(),
+                    width,
+                    height
+                );
+            }
+            let track = TrackLocalStaticRTP::new(
+                RTCRtpCodecCapability {
+                    mime_type: format!("video/{}", video_stream.1.encoding_name()),
+                    ..Default::default()
+                },
+                "video".to_owned(),
+                "webrtc-rs".to_owned(),
+            );
+            (video_stream.0, Arc::new(track))
+        };
+
+        let audio_track = if !available_audio_streams.is_empty() {
+            let audio_stream = available_audio_streams[0];
+            info!(
+                "Selected audio stream #{}: {}",
+                audio_stream.0,
+                audio_stream.1.encoding_name()
+            );
+
+            let track = TrackLocalStaticRTP::new(
+                RTCRtpCodecCapability {
+                    mime_type: format!("audio/{}", audio_stream.1.encoding_name()),
+                    ..Default::default()
+                },
+                "audio".to_owned(),
+                "webrtc-rs".to_owned(),
+            );
+            Some((audio_stream.0, Arc::new(track)))
+        } else {
+            None
+        };
+        (video_track, audio_track)
+    };
+
+    session
+        .setup(
+            video_track.0,
+            SetupOptions::default().transport(source.transport.clone()),
+        )
+        .await
+        .unwrap();
+
+    if let Some(audio_stream) = audio_track.as_ref() {
+        session
+            .setup(
+                audio_stream.0,
+                SetupOptions::default().transport(source.transport),
+            )
+            .await
+            .unwrap();
+    }
 
     let api = {
         // Create a MediaEngine object to configure the supported codec
@@ -145,52 +321,87 @@ async fn main() {
             .build()
     };
 
-    let app_state = AppState::new(api);
+    let mut session = session
+        .play(retina::client::PlayOptions::default())
+        .await
+        .unwrap();
 
-    // Запускаем UDP слушатель для приёма RTP пакетов
-    let video_tracks = Arc::clone(&app_state.video_tracks);
-    tokio::spawn(async move {
-        let udp_listener = tokio::net::UdpSocket::bind("127.0.0.1:5004")
-            .await
-            .expect("Failed to bind UDP socket on port 5004");
+    let app_state = AppState::new(api, video_track, audio_track);
 
-        info!("UDP listener started on 127.0.0.1:5004");
-        info!("Send RTP packets to this address using GStreamer or ffmpeg");
+    {
+        let cloned_app_state = app_state.clone();
+        tokio::spawn(async move {
+            // Create buffers for packets with channels
+            let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
 
-        let mut inbound_rtp_packet = vec![0u8; 1600]; // UDP MTU
-        let mut packet_count = 0u64;
-        loop {
-            match udp_listener.recv_from(&mut inbound_rtp_packet).await {
-                Ok((n, source)) => {
-                    packet_count += 1;
-                    if packet_count % 100 == 0 {
-                        trace!(
-                            "Received {} RTP packets (last from {}), broadcasting to {} tracks",
-                            packet_count,
-                            source,
-                            video_tracks.len()
-                        );
-                    }
-
-                    // Отправляем пакет всем активным video tracks
-                    for entry in video_tracks.iter() {
-                        let track = entry.value();
-                        if let Err(err) = track.write(&inbound_rtp_packet[..n]).await {
-                            if WebRTCError::ErrClosedPipe != err {
-                                error!("video_track write error: {}", err);
-                            }
+            // Task for writing video packets
+            let video_track_clone = cloned_app_state.video_track.1.clone();
+            tokio::spawn(async move {
+                while let Some(packet_data) = video_rx.recv().await {
+                    if let Err(err) = video_track_clone.write(&packet_data).await {
+                        if WebRTCError::ErrClosedPipe != err {
+                            trace!("video_track write error: {}", err);
+                        } else {
+                            break;
                         }
                     }
                 }
-                Err(e) => {
-                    error!("UDP recv error: {}", e);
-                    break;
+            });
+
+            // Task for writing audio packets (if available)
+            if let Some((_, audio_track)) = &cloned_app_state.audio_track {
+                let audio_track_clone = audio_track.clone();
+                tokio::spawn(async move {
+                    while let Some(packet_data) = audio_rx.recv().await {
+                        if let Err(err) = audio_track_clone.write(&packet_data).await {
+                            if WebRTCError::ErrClosedPipe != err {
+                                trace!("audio_track write error: {}", err);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Main loop for reading packets from RTSP
+            while let Some(item) = session.next().await {
+                match item {
+                    Ok(PacketItem::Rtp(rtp)) => {
+                        let stream_id = rtp.stream_id();
+                        let packet_data = rtp.raw().to_vec();
+
+                        // Send packet to the corresponding channel without blocking
+                        if stream_id == cloned_app_state.video_track.0 {
+                            if video_tx.try_send(packet_data).is_err() {
+                                trace!("Video buffer full, dropping packet");
+                            }
+                        } else if let Some((audio_stream_id, _)) = &cloned_app_state.audio_track {
+                            if stream_id == *audio_stream_id {
+                                if audio_tx.try_send(packet_data).is_err() {
+                                    trace!("Audio buffer full, dropping packet");
+                                }
+                            } else {
+                                warn!("Received RTP for unknown stream ID: {}", stream_id);
+                            }
+                        } else {
+                            warn!("Received RTP for unknown stream ID: {}", stream_id);
+                        }
+                    }
+                    Ok(PacketItem::Rtcp(rtcp)) => {
+                        trace!("Received RTCP packet: {:?}", rtcp);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Error receiving packet: {:?}", e);
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
-    // Настройка CORS для разрешения запросов с любых источников
+    // Configure CORS to allow requests from any origin
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -199,6 +410,7 @@ async fn main() {
     let app = axum::Router::new()
         .route("/whep", axum::routing::post(whep_offer))
         .route("/whep/resource/{id}", axum::routing::delete(whep_delete))
+        .fallback_service(tower_http::services::ServeDir::new("static"))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
@@ -293,7 +505,8 @@ async fn whep_offer(
     State(AppState {
         api,
         peer_connections,
-        video_tracks,
+        video_track,
+        audio_track,
     }): State<AppState>,
     SDPOffer(offer): SDPOffer,
 ) -> SDPAnswer {
@@ -304,41 +517,36 @@ async fn whep_offer(
 
     let pc = Arc::new(pc);
 
-    // Создаём video track для отправки видео через WebRTC
-    let video_track = Arc::new(TrackLocalStaticRTP::new(
-        RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_VP8.to_owned(),
-            ..Default::default()
-        },
-        "video".to_owned(),
-        "webrtc-rs".to_owned(),
-    ));
-
-    // Добавляем track в PeerConnection
-    let rtp_sender = pc
-        .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
+    let rtp_video_sender = pc
+        .add_track(video_track.1.clone() as Arc<dyn TrackLocal + Send + Sync>)
         .await
         .unwrap();
 
-    // Читаем входящие RTCP пакеты (необходимо для NACK и других функций)
     tokio::spawn(async move {
         let mut rtcp_buf = vec![0u8; 1500];
-        while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+        while let Ok((_, _)) = rtp_video_sender.read(&mut rtcp_buf).await {}
     });
+
+    if let Some((_, audio_track)) = audio_track {
+        let rtp_audio_sender = pc
+            .add_track(audio_track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+            .unwrap();
+
+        tokio::spawn(async move {
+            let mut rtcp_buf = vec![0u8; 1500];
+            while let Ok((_, _)) = rtp_audio_sender.read(&mut rtcp_buf).await {}
+        });
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
 
-    // Добавляем track в список активных треков
-    video_tracks.insert(id.clone(), Arc::clone(&video_track));
-
-    // Устанавливаем обработчик изменения состояния соединения
+    // Set up peer connection state change handler
     let id_for_handler = id.clone();
     let peer_connections_clone = peer_connections.clone();
-    let video_tracks_clone = Arc::clone(&video_tracks);
     pc.on_peer_connection_state_change(Box::new(move |state| {
         let id = id_for_handler.clone();
         let peer_connections = peer_connections_clone.clone();
-        let video_tracks = video_tracks_clone.clone();
 
         Box::pin(async move {
             use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -352,7 +560,6 @@ async fn whep_offer(
                     if let Some((_, pc)) = peer_connections.remove(&id) {
                         let _ = pc.close().await;
                     }
-                    video_tracks.remove(&id);
 
                     info!(
                         "🧹 Session {} auto-removed | Remaining: {}",
@@ -374,10 +581,9 @@ async fn whep_offer(
     peer_connections.insert(id.clone(), pc);
 
     info!(
-        "✅ Session created: {} | Sessions: {} | Tracks: {}",
+        "✅ Session created: {} | Sessions: {}",
         &id[..8],
-        peer_connections.len(),
-        video_tracks.len()
+        peer_connections.len()
     );
 
     SDPAnswer(answer, id)
@@ -385,16 +591,12 @@ async fn whep_offer(
 
 async fn whep_delete(
     State(AppState {
-        peer_connections,
-        video_tracks,
-        ..
+        peer_connections, ..
     }): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> axum::http::StatusCode {
     if let Some((_, pc)) = peer_connections.remove(&id) {
         pc.close().await.unwrap();
-        // Удаляем video track из списка активных треков
-        video_tracks.remove(&id);
 
         info!(
             "🗑️  Session deleted: {} | Remaining: {}",
@@ -408,75 +610,3 @@ async fn whep_delete(
         axum::http::StatusCode::NOT_FOUND
     }
 }
-
-// let source = Source::parse();
-
-// {
-//     let creds = match (source.username, source.password) {
-//         (Some(user), pass) => Some(retina::client::Credentials {
-//             username: user,
-//             password: pass.unwrap_or_default(),
-//         }),
-
-//         _ => None,
-//     };
-
-//     let upstream_session_group = Arc::new(retina::client::SessionGroup::default());
-
-//     let _session = retina::client::Session::describe(
-//         source.url.into(),
-//         retina::client::SessionOptions::default()
-//             .creds(creds)
-//             .teardown(source.teardown)
-//             .session_group(upstream_session_group)
-//             .user_agent("RTSP to WebRTC example".to_owned()),
-//     )
-//     .await
-//     .unwrap();
-// }
-
-// let stream_i = session
-//     .streams()
-//     .iter()
-//     .position(|s| s.media() == "video" && s.encoding_name() == "h264")
-//     .unwrap();
-
-// session
-//     .setup(
-//         stream_i,
-//         SetupOptions::default().transport(source.transport),
-//     )
-//     .await
-//     .unwrap();
-
-// let mut session = session
-//     .play(retina::client::PlayOptions::default())
-//     .await
-//     .unwrap()
-//     .demuxed()
-//     .unwrap();
-
-// while let Some(item) = session.next().await {
-//     match item {
-//         Ok(CodecItem::VideoFrame(video_frame)) => {
-//             println!("Received video frame: {:#?}", video_frame);
-//         }
-//         Ok(CodecItem::AudioFrame(audio_frame)) => {
-//             println!("Received audio frame: {:#?}", audio_frame);
-//         }
-//         Ok(CodecItem::MessageFrame(message_frame)) => {
-//             println!(
-//                 "Received message frame: timestamp={}, size={}",
-//                 message_frame.timestamp(),
-//                 message_frame.data().len()
-//             );
-//         }
-//         Ok(CodecItem::Rtcp(rtcp)) => {
-//             println!("Received RTCP packet: {:?}", rtcp);
-//         }
-//         Ok(_) => unimplemented!(),
-//         Err(e) => {
-//             eprintln!("Error receiving packet: {:?}", e);
-//         }
-//     }
-// }

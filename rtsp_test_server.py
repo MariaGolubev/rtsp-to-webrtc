@@ -28,7 +28,8 @@ def main():
     #               repeat-sequence-header=true inserts SPS/PPS with every IDR frame
     pipeline = (
         "( videotestsrc pattern=ball is-live=true ! "
-        "video/x-raw,width=640,height=480,framerate=30/1 ! "
+        "video/x-raw,width=640,height=480,framerate=60/1 ! "
+        "clockoverlay time-format=\"%Y-%m-%d %H:%M:%S\" shaded-background=true font-desc=\"Sans, 24\" ! "
         "nvh264enc bitrate=2000 gop-size=30 repeat-sequence-header=true ! "
         "h264parse ! "
         "rtph264pay name=pay0 pt=96 ) "
@@ -48,6 +49,7 @@ def main():
     pipeline2 = (
         "( videotestsrc pattern=smpte is-live=true ! "
         "video/x-raw,width=1280,height=720,framerate=30/1 ! "
+        "clockoverlay time-format=\"%Y-%m-%d %H:%M:%S\" shaded-background=true font-desc=\"Sans, 32\" ! "
         "nvh264enc bitrate=4000 gop-size=30 repeat-sequence-header=true ! "
         "h264parse ! "
         "rtph264pay name=pay0 pt=96 ) "
@@ -75,11 +77,11 @@ def main():
     print("")
     print("Stream 1 (640x480, ball pattern + ticks, H.264 + G.711 PCMU):")
     print(f"  URL: rtsp://localhost:8554/test")
-    print(f"  Network: rtsp://<your-ip>:8554/test")
+    print(f"  Network: rtsp://localhost:8554/test")
     print("")
     print("Stream 2 (1280x720, SMPTE + sine 440Hz, H.264 + G.711 PCMA):")
     print(f"  URL: rtsp://localhost:8554/test2")
-    print(f"  Network: rtsp://<your-ip>:8554/test2")
+    print(f"  Network: rtsp://localhost:8554/test2")
     print("")
     print("Test with:")
     print("  VLC: vlc rtsp://localhost:8554/test")
