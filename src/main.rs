@@ -5,7 +5,10 @@ use axum::{
     response::IntoResponse,
 };
 use clap::Parser;
-use retina::client::{PacketItem, SetupOptions};
+use retina::{
+    client::{PacketItem, SetupOptions},
+    rtp::ReceivedPacket,
+};
 use tokio_stream::StreamExt;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -332,14 +335,14 @@ async fn main() {
         let cloned_app_state = app_state.clone();
         tokio::spawn(async move {
             // Create buffers for packets with channels
-            let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
-            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+            let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<ReceivedPacket>(100);
+            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<ReceivedPacket>(100);
 
             // Task for writing video packets
             let video_track_clone = cloned_app_state.video_track.1.clone();
             tokio::spawn(async move {
-                while let Some(packet_data) = video_rx.recv().await {
-                    if let Err(err) = video_track_clone.write(&packet_data).await {
+                while let Some(rtp) = video_rx.recv().await {
+                    if let Err(err) = video_track_clone.write(rtp.raw()).await {
                         if WebRTCError::ErrClosedPipe != err {
                             trace!("video_track write error: {}", err);
                         } else {
@@ -353,8 +356,8 @@ async fn main() {
             if let Some((_, audio_track)) = &cloned_app_state.audio_track {
                 let audio_track_clone = audio_track.clone();
                 tokio::spawn(async move {
-                    while let Some(packet_data) = audio_rx.recv().await {
-                        if let Err(err) = audio_track_clone.write(&packet_data).await {
+                    while let Some(rtp) = audio_rx.recv().await {
+                        if let Err(err) = audio_track_clone.write(rtp.raw()).await {
                             if WebRTCError::ErrClosedPipe != err {
                                 trace!("audio_track write error: {}", err);
                             } else {
@@ -370,16 +373,15 @@ async fn main() {
                 match item {
                     Ok(PacketItem::Rtp(rtp)) => {
                         let stream_id = rtp.stream_id();
-                        let packet_data = rtp.raw().to_vec();
 
                         // Send packet to the corresponding channel without blocking
                         if stream_id == cloned_app_state.video_track.0 {
-                            if video_tx.try_send(packet_data).is_err() {
+                            if video_tx.try_send(rtp).is_err() {
                                 trace!("Video buffer full, dropping packet");
                             }
                         } else if let Some((audio_stream_id, _)) = &cloned_app_state.audio_track {
                             if stream_id == *audio_stream_id {
-                                if audio_tx.try_send(packet_data).is_err() {
+                                if audio_tx.try_send(rtp).is_err() {
                                     trace!("Audio buffer full, dropping packet");
                                 }
                             } else {
@@ -436,9 +438,7 @@ async fn main() {
         .layer(cors)
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("localhost:8080")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
     info!("🚀 WHEP server started on http://localhost:8080");
     info!("📡 POST SDP offers to http://localhost:8080/whep");
@@ -449,12 +449,15 @@ async fn main() {
 
 struct SDPOffer(pub RTCSessionDescription);
 
-impl FromRequest<AppState> for SDPOffer {
+impl<S> FromRequest<S> for SDPOffer
+where
+    S: Send + Sync,
+{
     type Rejection = axum::http::StatusCode;
 
     async fn from_request(
         req: axum::http::Request<axum::body::Body>,
-        _state: &AppState,
+        _state: &S,
     ) -> Result<Self, Self::Rejection> {
         let ct = req
             .headers()
