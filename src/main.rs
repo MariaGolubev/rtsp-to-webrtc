@@ -14,7 +14,7 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use webrtc::{
     Error as WebRTCError,
     api::{
@@ -23,6 +23,18 @@ use webrtc::{
     },
     interceptor::registry::Registry,
     peer_connection::sdp::session_description::RTCSessionDescription,
+    rtcp::{
+        goodbye::Goodbye,
+        payload_feedbacks::{
+            full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
+        },
+        receiver_report::ReceiverReport,
+        sender_report::SenderReport,
+        transport_feedbacks::{
+            rapid_resynchronization_request::RapidResynchronizationRequest,
+            transport_layer_cc::TransportLayerCc,
+        },
+    },
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{
         TrackLocal, TrackLocalWriter, track_local_static_rtp::TrackLocalStaticRTP,
@@ -392,7 +404,34 @@ async fn main() {
                         }
                     }
                     Ok(PacketItem::Rtcp(rtcp)) => {
-                        trace!("Received RTCP packet: {:?}", rtcp);
+                        debug!(
+                            "Received RTCP compound packet from stream {}",
+                            rtcp.stream_id()
+                        );
+                        for pkt in rtcp.pkts() {
+                            match pkt.as_typed() {
+                                Ok(Some(retina::rtcp::TypedPacketRef::SenderReport(sr))) => {
+                                    debug!(
+                                        "  RTCP SR: ssrc={:#x}, ntp={}, rtp={}",
+                                        sr.ssrc(),
+                                        sr.ntp_timestamp().0,
+                                        sr.rtp_timestamp()
+                                    );
+                                }
+                                Ok(Some(retina::rtcp::TypedPacketRef::ReceiverReport(rr))) => {
+                                    debug!("  RTCP RR: ssrc={:#x}", rr.ssrc());
+                                }
+                                Ok(Some(_)) => {
+                                    debug!("  RTCP: other typed packet");
+                                }
+                                Ok(None) => {
+                                    debug!("  RTCP: payload_type={}", pkt.payload_type());
+                                }
+                                Err(e) => {
+                                    warn!("  RTCP parse error: {}", e);
+                                }
+                            }
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -537,8 +576,42 @@ async fn whep_offer(
             .unwrap();
 
         tokio::spawn(async move {
-            let mut rtcp_buf = vec![0u8; 1500];
-            while let Ok((_, _)) = rtp_audio_sender.read(&mut rtcp_buf).await {}
+            let mut rtcp_buf = [0u8; 1500];
+            while let Ok((rtcp, _atr)) = rtp_audio_sender.read(&mut rtcp_buf).await {
+                for pkt in rtcp {
+                    if let Some(_sr) = pkt.as_any().downcast_ref::<SenderReport>() {
+                        debug!("RTCP: Sender Report (SR)");
+                        continue;
+                    }
+                    if let Some(_rr) = pkt.as_any().downcast_ref::<ReceiverReport>() {
+                        debug!("RTCP: Receiver Report (RR)");
+                        continue;
+                    }
+                    if let Some(_pli) = pkt.as_any().downcast_ref::<PictureLossIndication>() {
+                        debug!("RTCP: PLI (Picture Loss Indication)");
+                        continue;
+                    }
+                    if let Some(_fir) = pkt.as_any().downcast_ref::<FullIntraRequest>() {
+                        debug!("RTCP: FIR (Full Intra Request)");
+                        continue;
+                    }
+                    if let Some(_tcc) = pkt.as_any().downcast_ref::<TransportLayerCc>() {
+                        debug!("RTCP: TCC (Transport-wide Congestion Control)");
+                        continue;
+                    }
+                    if let Some(_rrr) = pkt.as_any().downcast_ref::<RapidResynchronizationRequest>()
+                    {
+                        debug!("RTCP: Rapid Resync Request (RRR)");
+                        continue;
+                    }
+                    if let Some(_bye) = pkt.as_any().downcast_ref::<Goodbye>() {
+                        debug!("RTCP: BYE");
+                        continue;
+                    }
+
+                    debug!("RTCP: Unknown / Raw packet");
+                }
+            }
         });
     }
 
