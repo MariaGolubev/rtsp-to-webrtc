@@ -166,13 +166,53 @@ Serves the static HTML player and assets
 ```
 rtsp-to-webrtc/
 ├── src/
-│ └── main.rs # Main server code
+│   ├── main.rs         # Main server and WebRTC setup
+│   ├── whep.rs         # WHEP protocol implementation
+│   ├── state.rs        # Shared application state
+│   ├── codec.rs        # Codec detection and RTP payloader creation
+│   └── cli.rs          # Command-line interface
 ├── static/
-│ └── index.html # Web player
+│   └── index.html      # Web player
 ├── rtsp_test_server.py # Test RTSP server (GStreamer)
-├── Cargo.toml # Rust dependencies
-└── README.md # This file
+├── Cargo.toml          # Rust dependencies
+├── AGENTS.md           # Development guidelines and crate documentation
+└── README.md           # This file
 ```
+
+## Development Guidelines
+
+### Commit Convention
+
+This project follows [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>[optional scope]: <description>
+```
+
+**Types:**
+- `feat` - new feature
+- `fix` - bug fix
+- `docs` - documentation changes
+- `style` - formatting, no code change
+- `refactor` - code restructuring
+- `test` - adding/correcting tests
+- `chore` - maintenance tasks
+
+**Examples:**
+- `feat: add streaming support`
+- `fix(parser): handle empty input`
+- `docs: update README with usage example`
+
+### Key Dependencies
+
+For detailed API documentation, see [AGENTS.md](AGENTS.md). Main crates:
+
+- **[axum](https://docs.rs/axum/0.8.6/)** - Web framework
+- **[tokio](https://docs.rs/tokio/1.48.0/)** - Async runtime
+- **[webrtc](https://docs.rs/webrtc/0.14.0/)** - WebRTC implementation
+- **[retina](https://docs.rs/retina/0.4.15/)** - RTSP client
+- **[tower-http](https://docs.rs/tower-http/0.6.6/)** - HTTP middleware
+- **[dashmap](https://docs.rs/dashmap/6.1.0/)** - Concurrent HashMap
 
 ## License
 
