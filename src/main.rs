@@ -272,12 +272,12 @@ async fn main() {
                         // Send packet to the corresponding channel without blocking
                         if stream_id == cloned_app_state.video_track.0 {
                             if video_tx.try_send(rtp).is_err() {
-                                trace!("Video buffer full, dropping packet");
+                                warn!("Video buffer full, dropping packet");
                             }
                         } else if let Some((audio_stream_id, _)) = &cloned_app_state.audio_track {
                             if stream_id == *audio_stream_id {
                                 if audio_tx.try_send(rtp).is_err() {
-                                    trace!("Audio buffer full, dropping packet");
+                                    warn!("Audio buffer full, dropping packet");
                                 }
                             } else {
                                 warn!("Received RTP for unknown stream ID: {}", stream_id);
